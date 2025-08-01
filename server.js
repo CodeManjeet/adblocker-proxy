@@ -1,145 +1,106 @@
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { URL } = require('url');
+const { URL } = require('url'); // Relative URL ko Absolute me badalne ke liye
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================================
-// ====> YOUR BLOCKLIST <====
-// Scripts, iframes, and images from these sources will be blocked.
+// ====> YAHAN APNI BLOCKLIST BANAYEIN <====
+// In domains/sources se aane wale scripts, iframes, images block ho jayenge.
+// Aap is list ko aur bada kar sakte hain.
 const blocklist = [
     'doubleclick.net',
-    'google-analytics.com',
-    'googletagmanager.com',
-    'googlesyndication.com',
-    'adservice.google.com',
     '/assets/jquery/static.js?type=mainstream&u=30334&v=2.0',
+    'https://www.googletagmanager.com/gtag/js?id=UA-123456789-1',
     '//bvtpk.com/tag.min.js',
     'nm.bustleusurps.com/g78AJDwy64Rnl59l/40913'
 ];
 // ==========================================================
 
 
-// Root route to provide instructions
-app.get('/', (req, res) => {
-    res.send(`
-        <h1>Adblocker Proxy Server</h1>
-        <p>This proxy fetches a website, removes ads and trackers, and serves the clean content.</p>
-        <p><b>Usage:</b> Append <code>/proxy/</code> followed by the full URL you want to visit.</p>
-        <p><b>Example:</b> <a href="/proxy/https://www.w3schools.com/html/">/proxy/https://www.w3schools.com/html/</a></p>
-    `);
-});
-
-
-// This is the new, primary proxy route. It handles all requests.
-app.get('/proxy/*', async (req, res) => {
-    // Extract the target URL from the request path
-    // The '/*' captures everything after '/proxy/'
-    const targetUrl = req.params[0];
+app.get('/', async (req, res) => {
+    // 1. User se URL lena (Query parameter se)
+    const targetUrl = req.query.url;
 
     if (!targetUrl) {
-        return res.status(400).send('Please provide a target URL in the path. Example: /proxy/https://example.com');
+        return res.status(400).send(`
+            <h1>Adblocker Proxy</h1>
+            <p>Please provide a URL in the query parameter.</p>
+            <p>Example: <a href="/?url=https://www.w3schools.com/html/">/?url=https://www.w3schools.com/html/</a></p>
+        `);
     }
-
-    console.log(`[PROXY] ==> Request for: ${targetUrl}`);
 
     try {
-        // Fetch the target URL. 'responseType: stream' is crucial for handling all content types (images, etc.)
+        // 2. Axios ka use karke target website ka HTML fetch karna
         const response = await axios.get(targetUrl, {
-            responseType: 'stream',
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                // Forward some headers from the original request to seem more like a real user
-                'Accept': req.headers.accept,
-                'Accept-Language': req.headers['accept-language'],
-                'Referer': new URL(targetUrl).origin // Set a plausible referer
+                // Kuch websites alag user-agent ko block karti hain, isliye browser jaisa dikhana behtar hai
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
+        const html = response.data;
 
-        // Get the content type from the original response
-        const contentType = response.headers['content-type'];
-        
-        // Transfer the original headers to our response to the client
-        res.set(response.headers);
+        // 3. Cheerio se HTML ko load karna (server-side jQuery jaisa)
+        const $ = cheerio.load(html);
 
-        // If the content is HTML, we need to process and clean it.
-        if (contentType && contentType.toLowerCase().includes('text/html')) {
-            
-            // Convert the response stream to a string to parse it
-            let html = '';
-            for await (const chunk of response.data) {
-                html += chunk.toString();
+        // Website ka base URL nikalna taaki relative links (jaise /images/logo.png) ko theek kar sakein
+        const baseUrl = new URL(targetUrl).origin;
+
+        console.log(`Proxying and cleaning: ${targetUrl}`);
+
+        // 4. Sabhi scripts, iframes, images, aur links ko check karna
+        $('script, iframe, img, link').each((index, element) => {
+            const el = $(element);
+            let src = el.attr('src') || el.attr('href');
+
+            if (!src) {
+                return; // Agar src ya href nahi hai to kuch na karein
             }
 
-            const $ = cheerio.load(html);
+            // Relative URL (jaise '/style.css') ko full URL (jaise 'https://website.com/style.css') me badalna
+            const absoluteSrc = new URL(src, targetUrl).href;
 
-            // This is the base URL of the site we are proxying (e.g., https://www.w3schools.com)
-            const baseUrl = new URL(targetUrl).origin;
+            // 5. Check karna ki source blocklist me hai ya nahi
+            const shouldBlock = blocklist.some(blockedDomain => absoluteSrc.includes(blockedDomain));
 
-            // === CORE LOGIC: Find all elements with src or href attributes ===
-            $('script, iframe, img, link, a').each((index, element) => {
-                const el = $(element);
-                // Get the original URL from src or href
-                const originalUrlAttr = el.attr('src') || el.attr('href');
+            if (shouldBlock) {
+                // Agar source blocklist me hai, to use HTML se हटा do
+                console.log(`[BLOCKED] ==> ${absoluteSrc}`);
+                el.remove();
+            } else {
+                // Agar block nahi karna hai, to uska relative path aane par use absolute path me badal do
+                // Taaki hamare proxy server par sab aache se load ho
+                if (el.attr('src')) el.attr('src', absoluteSrc);
+                if (el.attr('href')) el.attr('href', absoluteSrc);
+            }
+        });
+        
+        // <==== NAYA CODE START ====>
+        // Ab specific div ko uski class se block karte hain.
+        
+        // Tarika 1: Seedhe class ke naam se
+        // Ye aapki di hui div jisme 'jw-logo' class hai, use hata dega.
+        console.log("Blocking div with class 'jw-logo'...");
+        $('.jw-logo').remove();
 
-                if (!originalUrlAttr) {
-                    return;
-                }
+        // Tarika 2 (Extra): General ad-divs ko block karna
+        // Aise koi bhi element jinki class ya id me "ad" शब्द aata ho, unhe hata do.
+        console.log("Blocking common ad containers...");
+        $('[class*="ad"], [id*="ad"]').remove();
+        // <==== NAYA CODE END ====>
 
-                // Create a full, absolute URL from the original attribute
-                // (e.g., '/path/style.css' becomes 'https://example.com/path/style.css')
-                const absoluteUrl = new URL(originalUrlAttr, targetUrl).href;
 
-                // 1. --- BLOCKING LOGIC ---
-                const shouldBlock = blocklist.some(blockedItem => absoluteUrl.includes(blockedItem));
-
-                if (shouldBlock) {
-                    console.log(`[BLOCKED] ==> ${absoluteUrl}`);
-                    el.remove(); // Remove the element from the HTML
-                    return; // Skip to the next element
-                }
-
-                // 2. --- REWRITING LOGIC ---
-                // Rewrite the URL to point back to our proxy
-                const proxyUrl = `/proxy/${absoluteUrl}`;
-
-                if (el.attr('src')) {
-                    el.attr('src', proxyUrl);
-                }
-                if (el.attr('href')) {
-                    // Don't proxy anchor links (#)
-                    if (originalUrlAttr.startsWith('#')) {
-                        return;
-                    }
-                    el.attr('href', proxyUrl);
-                }
-            });
-            
-            // === AD-DIV BLOCKING LOGIC ===
-            console.log("Blocking specific ad containers...");
-            $('.jw-logo').remove();
-            $('[class*="ad"], [id*="ad"]').remove();
-
-            // Send the cleaned and rewritten HTML to the user
-            res.send($.html());
-
-        } else {
-            // If the content is NOT HTML (e.g., CSS, JS, an image), just pass it through directly.
-            // .pipe() sends the data stream directly to the user, which is very efficient.
-            console.log(`[STREAM] ==> Piping content of type: ${contentType}`);
-            response.data.pipe(res);
-        }
+        // 6. Saaf kiya hua HTML user ko bhejna
+        res.send($.html());
 
     } catch (error) {
-        console.error("Error in proxy request:", error.message);
-        res.status(500).send(`Error fetching the URL via proxy. <br> ${error.message}`);
+        console.error("Error fetching or processing URL:", error.message);
+        res.status(500).send(`Error fetching the URL: ${targetUrl}. <br> ${error.message}`);
     }
 });
-
 
 app.listen(PORT, () => {
     console.log(`Adblocker Proxy server is running on http://localhost:${PORT}`);
-    console.log(`Usage: Open http://localhost:${PORT}/proxy/https://example.com`);
 });
