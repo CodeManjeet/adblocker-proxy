@@ -76,20 +76,6 @@ app.get('/', async (req, res) => {
                 if (el.attr('href')) el.attr('href', absoluteSrc);
             }
         });
-        
-        // <==== NAYA CODE START ====>
-        // Ab specific div ko uski class se block karte hain.
-        
-        // Tarika 1: Seedhe class ke naam se
-        // Ye aapki di hui div jisme 'jw-logo' class hai, use hata dega.
-        console.log("Blocking div with class 'jw-logo'...");
-        $('.jw-logo').remove();
-
-        // Tarika 2 (Extra): General ad-divs ko block karna
-        // Aise koi bhi element jinki class ya id me "ad" शब्द aata ho, unhe hata do.
-        console.log("Blocking common ad containers...");
-        $('[class*="ad"], [id*="ad"]').remove();
-        // <==== NAYA CODE END ====>
 
 
         // 6. Saaf kiya hua HTML user ko bhejna
