@@ -1,27 +1,37 @@
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { URL } = require('url'); // Relative URL ko Absolute me badalne ke liye
+const { URL } = require('url');
+
+// <<< NAYE IMPORTS START >>>
+// Cookies ko handle karne ke liye
+const { CookieJar } = require('tough-cookie');
+const { wrapper } = require('axios-cookiejar-support');
+// <<< NAYE IMPORTS END >>>
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ==========================================================
-// ====> YAHAN APNI BLOCKLIST BANAYEIN <====
-// In domains/sources se aane wale scripts, iframes, images block ho jayenge.
-// Aap is list ko aur bada kar sakte hain.
+// <<< AXIOS INSTANCE WITH COOKIE SUPPORT START >>>
+// Hum ek naya Axios instance banayenge jo cookies ko automatically handle karega.
+const jar = new CookieJar();
+const client = wrapper(axios.create({ jar }));
+// <<< AXIOS INSTANCE WITH COOKIE SUPPORT END >>>
+
+
+// Blocklist bilkul waisi hi rahegi
 const blocklist = [
     'doubleclick.net',
-    '/assets/jquery/static.js?type=mainstream&u=30334&v=2.0',
-    'https://www.googletagmanager.com/gtag/js?id=UA-123456789-1',
-    '//bvtpk.com/tag.min.js',
-    'nm.bustleusurps.com/g78AJDwy64Rnl59l/40913'
+    'googlesyndication.com',
+    'google-analytics.com',
+    'googletagmanager.com',
+    '/assets/jquery/static.js', // Query parameters hatane se block karna aasan hoga
+    'bvtpk.com',
+    'nm.bustleusurps.com'
 ];
-// ==========================================================
 
 
 app.get('/', async (req, res) => {
-    // 1. User se URL lena (Query parameter se)
     const targetUrl = req.query.url;
 
     if (!targetUrl) {
@@ -33,60 +43,79 @@ app.get('/', async (req, res) => {
     }
 
     try {
-        // 2. Axios ka use karke target website ka HTML fetch karna
-        const response = await axios.get(targetUrl, {
+        // <<< YAHAN BADLAV KIYA GAYA HAI >>>
+        // Hum ab 'client' (cookie-supported axios) ka istemal karenge aur behtar headers bhejenge
+        const response = await client.get(targetUrl, {
             headers: {
-                // Kuch websites alag user-agent ko block karti hain, isliye browser jaisa dikhana behtar hai
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+                // Real browser jaise dikhne ke liye zaroori headers
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': new URL(targetUrl).origin, // Website ko batana ki hum usi ki site se aaye hain
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'DNT': '1' // Do Not Track
+            },
+            // Gzip/compressed data ko handle karne ke liye
+            responseType: 'arraybuffer', 
+            decompress: true
         });
-        const html = response.data;
 
-        // 3. Cheerio se HTML ko load karna (server-side jQuery jaisa)
+        // Response ke buffer ko HTML string me badalna
+        const html = response.data.toString();
+        // <<< BADLAV YAHAN KHATAM >>>
+        
         const $ = cheerio.load(html);
-
-        // Website ka base URL nikalna taaki relative links (jaise /images/logo.png) ko theek kar sakein
         const baseUrl = new URL(targetUrl).origin;
 
         console.log(`Proxying and cleaning: ${targetUrl}`);
 
-        // 4. Sabhi scripts, iframes, images, aur links ko check karna
         $('script, iframe, img, link').each((index, element) => {
             const el = $(element);
             let src = el.attr('src') || el.attr('href');
 
             if (!src) {
-                return; // Agar src ya href nahi hai to kuch na karein
+                return;
+            }
+            
+            // '//' se shuru hone wale URLs ko handle karna
+            if(src.startsWith('//')){
+                src = new URL(targetUrl).protocol + src;
             }
 
-            // Relative URL (jaise '/style.css') ko full URL (jaise 'https://website.com/style.css') me badalna
             const absoluteSrc = new URL(src, targetUrl).href;
-
-            // 5. Check karna ki source blocklist me hai ya nahi
             const shouldBlock = blocklist.some(blockedDomain => absoluteSrc.includes(blockedDomain));
 
             if (shouldBlock) {
-                // Agar source blocklist me hai, to use HTML se हटा do
                 console.log(`[BLOCKED] ==> ${absoluteSrc}`);
                 el.remove();
             } else {
-                // Agar block nahi karna hai, to uska relative path aane par use absolute path me badal do
-                // Taaki hamare proxy server par sab aache se load ho
                 if (el.attr('src')) el.attr('src', absoluteSrc);
                 if (el.attr('href')) el.attr('href', absoluteSrc);
             }
         });
+        
+        console.log("Blocking div with class 'jw-logo'...");
+        $('.jw-logo').remove();
 
+        console.log("Blocking common ad containers...");
+        $('[class*="ad"], [id*="ad"], [class*="banner"]').remove();
 
-        // 6. Saaf kiya hua HTML user ko bhejna
         res.send($.html());
 
     } catch (error) {
         console.error("Error fetching or processing URL:", error.message);
-        res.status(500).send(`Error fetching the URL: ${targetUrl}. <br> ${error.message}`);
+        if (error.response) {
+             // Agar website ne error bheja hai (like 403 Forbidden)
+            res.status(error.response.status).send(`Error from target server: ${error.response.statusText} <br> The website is likely blocking our proxy. <br> ${error.message}`);
+        } else {
+            res.status(500).send(`Error fetching the URL: ${targetUrl}. <br> ${error.message}`);
+        }
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Adblocker Proxy server is running on http://localhost:${PORT}`);
+// <<< DEPLOYMENT KE LIYE BADLAV >>>
+// '0.0.0.0' add karna zaroori hai taaki server Render jaise platform par sahi se chale
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on port ${PORT}`);
 });
